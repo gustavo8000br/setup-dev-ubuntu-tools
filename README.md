@@ -46,16 +46,16 @@ bash setup-dev-ubuntu.sh
 What happens:
 
 1. You pick the language (English or Português).
-2. You pick the components from a checklist. Type numbers to toggle (`2 5`), `all`, `none`, or press Enter to continue.
+2. You pick the components from an arrow-key checklist: ↑/↓ to move, Space to toggle, `a` for all, `n` for none, Enter to confirm. A panel under the list explains the highlighted item (what it is and why you might want it).
 3. If you selected Git, it asks for your name and email, and whether to generate an SSH key.
 4. It asks whether you want to pick specific versions. The default is the latest stable version of everything.
 5. It shows the final plan with the exact versions and asks for confirmation.
-6. It asks for your `sudo` password once and installs everything.
+6. It asks for your `sudo` password once and installs everything. Each step is one clean line with a spinner (`✔ Installing Docker Engine (12s)`); the noisy output of apt, git and curl goes to a log file instead of your screen.
 7. At the end it prints the installed versions and the remaining manual steps.
 
 ### Choosing versions
 
-When you answer yes to "pick specific versions", each selected tool asks for a version. You can type:
+When you answer yes to "pick specific versions", each selected tool shows a list: the recommended option first, a few recent versions, and **Other...**. Pick one with the arrows (or the number keys), or choose **Other...** to type a name or number:
 
 | Tool | Accepted input | Example |
 |---|---|---|
@@ -85,6 +85,7 @@ bash setup-dev-ubuntu.sh [--lang en-US|pt-BR] [--components a,b,c] [--yes] [--he
 |---|---|
 | `--lang en-US` / `--lang pt-BR` | Choose the language and skip the menu |
 | `--components terminal,node,docker` | Choose components without the menu. Valid ids: `terminal,base,git,gh,python,node,docker,vscode` |
+| `--plain` | Use simple numbered prompts instead of arrow-key menus (screen readers, limited terminals) |
 | `-y`, `--yes` | Ask no questions; use defaults and environment variables |
 | `-h`, `--help` | Show help |
 
@@ -100,6 +101,7 @@ Environment variables:
 | `GH_VERSION` | `latest` | GitHub CLI request |
 | `PYTHON_VERSION` | `system` | `system` or a minor version such as `3.13` |
 | `NVM_VERSION` | `latest` | nvm release, e.g. `v0.40.8` |
+| `NO_COLOR` | unset | Set it to turn off colors |
 | `INSTALL_<COMPONENT>` | `true` | Default selection, e.g. `INSTALL_DOCKER=false` |
 
 Fully non-interactive example:
@@ -137,6 +139,8 @@ The VS Code extensions are a list at the top of the script (`VSCODE_EXTENSIONS`)
 
 ### Good to know
 
+- **Clean screen, detailed log:** the full output of every command goes to `~/.local/state/setup-dev-ubuntu/install-<date-time>.log`. If a step fails, the script shows the last lines of that step and the path of the log.
+- **Arrow-key menus need a real terminal** of at least 24 rows by 60 columns. Otherwise (or with `--plain`, or when the output is piped) the script falls back to numbered prompts on its own.
 - **Secrets:** put tokens, API keys and private aliases in `~/.zshrc.local`. The generated `~/.zshrc` loads it if it exists, so you never need to put secrets in the script or in a public repo.
 - **Fast shell startup:** nvm is loaded lazily through the Oh My Zsh `nvm` plugin. The first `node`/`npm` call in a session loads it.
 - **Python on Ubuntu 24.04:** global `pip install` is blocked by design (PEP 668). Use `python3 -m venv` per project and `pipx` for command-line tools.
@@ -148,12 +152,14 @@ The VS Code extensions are a list at the top of the script (`VSCODE_EXTENSIONS`)
 
 | Problem | What to try |
 |---|---|
+| The menu looks garbled or the arrows do nothing | Run with `--plain` for numbered prompts, or enlarge the terminal window |
 | zsh does not open by default | Log out and back in. Check with `echo $SHELL`. In VS Code, run "Terminal: Select Default Profile" |
 | Broken icons in the prompt | Select the **MesloLGS NF** font in your terminal, then run `p10k configure` |
 | `docker: permission denied` | Log out and back in so the `docker` group applies |
 | "No version matches" | Type `list` to see what is available, or use a shorter prefix (`27` instead of `27.3.9`) |
 | Python version not found | Try the minor version only (`3.13`). The deadsnakes PPA must support your Ubuntu release |
 | A pinned package will not upgrade | That is the `apt-mark hold`. Run `sudo apt-mark unhold <package>` |
+| A step failed | Read the last lines the script prints, or open the log file whose path is shown. It has the full output of every step |
 | VS Code extension failed to install | Install it later from inside VS Code; the script continues either way |
 
 ### Contributing
@@ -210,16 +216,16 @@ bash setup-dev-ubuntu.sh
 O que acontece:
 
 1. Você escolhe o idioma (English ou Português).
-2. Você escolhe os componentes numa lista. Digite números para marcar/desmarcar (`2 5`), `all`, `none`, ou Enter para continuar.
+2. Você escolhe os componentes numa lista com setas: ↑/↓ para mover, Espaço para marcar/desmarcar, `a` para todos, `n` para nenhum, Enter para confirmar. Um painel abaixo da lista explica o item em foco (o que é e por que você pode querer).
 3. Se selecionou o Git, ele pergunta seu nome e e-mail, e se deve gerar uma chave SSH.
 4. Ele pergunta se você quer escolher versões específicas. O padrão é a versão estável mais recente de tudo.
 5. Ele mostra o plano final com as versões exatas e pede confirmação.
-6. Ele pede a senha do `sudo` uma vez e instala tudo.
+6. Ele pede a senha do `sudo` uma vez e instala tudo. Cada etapa vira uma linha limpa com spinner (`✔ Instalando Docker Engine (12s)`); a saída barulhenta do apt, git e curl vai para um arquivo de log, não para a sua tela.
 7. No final, mostra as versões instaladas e os passos manuais que faltam.
 
 ### Escolhendo versões
 
-Se você responder sim para "escolher versões específicas", cada ferramenta selecionada pergunta a versão. Você pode digitar:
+Se você responder sim para "escolher versões específicas", cada ferramenta selecionada mostra uma lista: a opção recomendada primeiro, algumas versões recentes e **Outra...**. Escolha com as setas (ou as teclas numéricas), ou escolha **Outra...** para digitar um nome ou número:
 
 | Ferramenta | Entrada aceita | Exemplo |
 |---|---|---|
@@ -249,6 +255,7 @@ bash setup-dev-ubuntu.sh [--lang en-US|pt-BR] [--components a,b,c] [--yes] [--he
 |---|---|
 | `--lang en-US` / `--lang pt-BR` | Escolhe o idioma e pula o menu |
 | `--components terminal,node,docker` | Escolhe componentes sem o menu. Ids válidos: `terminal,base,git,gh,python,node,docker,vscode` |
+| `--plain` | Usa perguntas numeradas simples em vez de menus com setas (leitores de tela, terminais limitados) |
 | `-y`, `--yes` | Não faz perguntas; usa padrões e variáveis de ambiente |
 | `-h`, `--help` | Mostra a ajuda |
 
@@ -264,6 +271,7 @@ Variáveis de ambiente:
 | `GH_VERSION` | `latest` | Pedido de versão do GitHub CLI |
 | `PYTHON_VERSION` | `system` | `system` ou uma versão menor como `3.13` |
 | `NVM_VERSION` | `latest` | Release do nvm, ex.: `v0.40.8` |
+| `NO_COLOR` | não definida | Defina para desligar as cores |
 | `INSTALL_<COMPONENTE>` | `true` | Seleção padrão, ex.: `INSTALL_DOCKER=false` |
 
 Exemplo totalmente sem interação:
@@ -301,6 +309,8 @@ As extensões do VS Code ficam numa lista no topo do script (`VSCODE_EXTENSIONS`
 
 ### Bom saber
 
+- **Tela limpa, log detalhado:** a saída completa de cada comando vai para `~/.local/state/setup-dev-ubuntu/install-<data-hora>.log`. Se uma etapa falhar, o script mostra as últimas linhas daquela etapa e o caminho do log.
+- **Menus com setas precisam de um terminal de verdade** com pelo menos 24 linhas por 60 colunas. Caso contrário (ou com `--plain`, ou quando a saída é redirecionada), o script volta sozinho para perguntas numeradas.
 - **Segredos:** coloque tokens, chaves de API e aliases privados em `~/.zshrc.local`. O `~/.zshrc` gerado carrega esse arquivo se ele existir, então você nunca precisa pôr segredo no script nem em repositório público.
 - **Terminal rápido:** o nvm é carregado sob demanda pelo plugin `nvm` do Oh My Zsh. A primeira chamada de `node`/`npm` na sessão carrega o nvm.
 - **Python no Ubuntu 24.04:** o `pip install` global é bloqueado de propósito (PEP 668). Use `python3 -m venv` por projeto e `pipx` para ferramentas de linha de comando.
@@ -312,12 +322,14 @@ As extensões do VS Code ficam numa lista no topo do script (`VSCODE_EXTENSIONS`
 
 | Problema | O que tentar |
 |---|---|
+| O menu fica bagunçado ou as setas não fazem nada | Rode com `--plain` para perguntas numeradas, ou aumente a janela do terminal |
 | O zsh não abre por padrão | Faça logout e login. Confira com `echo $SHELL`. No VS Code, use "Terminal: Select Default Profile" |
 | Ícones quebrados no prompt | Selecione a fonte **MesloLGS NF** no terminal e rode `p10k configure` |
 | `docker: permission denied` | Faça logout e login para o grupo `docker` valer |
 | "Nenhuma versão combina" | Digite `list` para ver as disponíveis, ou use um prefixo menor (`27` em vez de `27.3.9`) |
 | Versão do Python não encontrada | Tente só a versão menor (`3.13`). O PPA deadsnakes precisa suportar sua versão do Ubuntu |
 | Um pacote fixado não atualiza | É o `apt-mark hold`. Rode `sudo apt-mark unhold <pacote>` |
+| Uma etapa falhou | Leia as últimas linhas que o script mostra, ou abra o log cujo caminho aparece na tela. Ele tem a saída completa de cada etapa |
 | Extensão do VS Code falhou | Instale depois pelo próprio VS Code; o script continua de qualquer jeito |
 
 ### Contribuindo
