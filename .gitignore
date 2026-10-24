@@ -1,0 +1,10 @@
+# Secrets and personal overrides: never commit these
+.zshrc.local
+*.bak.*
+.env
+.env.*
+
+# Editor/OS noise
+.DS_Store
+*.swp
+.vscode/
