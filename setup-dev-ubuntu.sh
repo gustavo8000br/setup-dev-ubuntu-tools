@@ -3,18 +3,22 @@
 # Development environment bootstrap for Ubuntu 24.04 (and Ubuntu-based distros).
 # Bootstrap de ambiente de desenvolvimento para Ubuntu 24.04 (e derivados do Ubuntu).
 #
-# You choose WHAT to install (each item is explained) and, optionally, WHICH VERSION.
-# Versions accept partial input: "24", "24.20", "lts", "krypton", "27.3", "3.13"...
-# Você escolhe O QUE instalar (cada item é explicado) e, se quiser, QUAL VERSÃO.
-# As versões aceitam entrada parcial: "24", "24.20", "lts", "krypton", "27.3", "3.13"...
+# You choose WHAT to install (arrow-key menus, each item explained) and, optionally,
+# WHICH VERSION (pick from a list or type a partial name/number: "24", "lts", "27.3"...).
+# Noisy tool output goes to a log file; the screen shows one clean line per step.
+#
+# Você escolhe O QUE instalar (menus com setas, cada item explicado) e, se quiser,
+# QUAL VERSÃO (escolha numa lista ou digite um nome/número parcial: "24", "lts", "27.3"...).
+# A saída barulhenta das ferramentas vai para um log; a tela mostra uma linha limpa por etapa.
 #
 # Usage / Uso:
-#   bash setup-dev-ubuntu.sh [--lang en-US|pt-BR] [--components a,b,c] [--yes] [--help]
+#   bash setup-dev-ubuntu.sh [--lang en-US|pt-BR] [--components a,b,c] [--plain] [--yes] [--help]
 #
 # Run as a normal user (NOT with sudo). It calls sudo when needed.
 # Rode como usuário normal (SEM sudo). Ele chama o sudo quando precisar.
 # Safe to re-run: anything already installed is skipped.
 
+# shellcheck disable=SC1091,SC2001,SC2005  # style-only notes (sourcing os-release/nvm, echo "$(t ...)")
 set -euo pipefail
 
 # ===============================================================
@@ -67,6 +71,7 @@ LANG_CODE="en-US"
 INTERACTIVE=false
 ASSUME_YES=false
 SHOW_HELP=false
+PLAIN=false
 COMPONENTS_ARG=""
 DO_SSH=false
 SSH_EXISTS=false
@@ -75,7 +80,21 @@ PREREQS_DONE=false
 REPO_ADDED=false
 NVM_RESOLVED=""
 NODE_CATALOG=""
+LOG_FILE=""
 TMP_FILES=()
+
+# Terminal capabilities (filled by init_term)
+TUI=false; SPIN=false; UTF=false
+TUI_COLS=80
+C_RESET=""; C_BOLD=""; C_DIM=""; C_CYAN=""; C_GREEN=""; C_RED=""; C_YELLOW=""
+M_OK="OK"; M_FAIL="X"; M_WARN="!"; M_PTR=">"; M_ON="[x]"; M_OFF="[ ]"; M_RULE="-"
+SPIN_FRAMES=('-' "\\" '|' '/')
+
+# Menu engine state
+CUR=0; KEY=""; CHOICE=0
+SINGLE_TITLE=""; SINGLE_OPTS=(); SINGLE_YESNO=false
+VOPT_LABELS=(); VOPT_SPECS=()
+PANEL_H=8
 
 COMPONENTS=(terminal base git gh python node docker vscode)
 VERSIONED=(gh python node docker vscode)
@@ -93,8 +112,9 @@ declare -A VLABEL=(
   [gh]="GitHub CLI" [python]="Python" [node]="Node.js"
   [docker]="Docker Engine" [vscode]="Visual Studio Code"
 )
-declare -A VEXACT=() VPIN=() VINFO=()
+declare -A VEXACT=() VPIN=() VINFO=() INSTALLED_TAG=()
 for _id in "${VERSIONED[@]}"; do VEXACT[$_id]=""; VPIN[$_id]=false; VINFO[$_id]=""; done
+for _id in "${COMPONENTS[@]}"; do INSTALLED_TAG[$_id]=""; done
 unset _id
 
 # ===============================================================
@@ -114,10 +134,20 @@ MSG_EN=(
   [sel_help]="Type the numbers to toggle (e.g. 2 5), 'all', 'none', or just press Enter to continue."
   [sel_invalid]="Not a valid choice: %s"
   [sel_none]="Nothing selected. Nothing to do."
+  [sel_summary]="Selected: %s"
   [comp_unknown]="Unknown component: %s (valid: %s)"
   [lbl_what]="What"
   [lbl_why]="Why"
   [tag_installed]="installed: %s"
+  [tui_help_multi]="Up/Down move  |  Space toggle  |  a all  |  n none  |  Enter confirm"
+  [tui_help_single]="Up/Down move  |  Enter select"
+  [opt_yes]="Yes"
+  [opt_no]="No"
+  [log_path]="Detailed log: %s"
+  [step_failed]="Failed: %s"
+  [step_failed_hint]="Last lines of the log (full log: %s):"
+  [apt_update]="Updating package lists"
+  [inst_pkgs]="Installing %s"
 
   [c_terminal_name]="Shell experience (zsh + Oh My Zsh + Powerlevel10k)"
   [c_terminal_what]="zsh as your default shell with the Oh My Zsh framework, autosuggestions, syntax highlighting, a live completion menu, the Powerlevel10k prompt theme, the MesloLGS NF icon font and a system-info welcome message (fastfetch)."
@@ -145,6 +175,9 @@ MSG_EN=(
   [c_vscode_why]="A popular, extensible editor with strong support for JavaScript, Python, Docker and Git. Version can be chosen."
 
   [ask_versions]="Do you want to pick specific versions? (default: the latest stable version of everything)"
+  [ver_menu_title]="Version for %s"
+  [ver_opt_other]="Other... (type a version number or name)"
+  [ver_recommended]="recommended"
   [ver_hint]="%s: press Enter for '%s', type a version number or name (e.g. %s), or type 'list' to see what is available."
   [ver_list_title]="Available versions (newest first):"
   [ver_none]="No versions found. Is the repository reachable?"
@@ -158,14 +191,14 @@ MSG_EN=(
   [ver_ex_python]="3.13, 3.12, system"
   [node_offline]="Could not reach nodejs.org to validate versions; '%s' will be passed straight to nvm."
   [nvm_fallback]="Could not look up the latest nvm release; using %s."
-  [python_ppa]="Python %s is not in the default repositories; adding the deadsnakes PPA."
+  [python_ppa]="Adding the deadsnakes PPA (Python %s is not in the default repositories)"
   [python_unavailable]="Python %s is not available."
   [python_list_note]="Other versions (e.g. 3.13) come from the deadsnakes PPA, which is added automatically when you type them."
   [python_extra]="Python %s installed alongside the system Python (it does not replace it). Use: python%s -m venv .venv"
-  [repo_prep]="Adding the %s apt repository to read available versions"
+  [repo_prep]="Adding the %s apt repository"
   [prereqs]="Installing prerequisites (curl, gnupg, software-properties-common)"
   [installed_keep]="%s is already installed (%s); keeping it."
-  [plan_title]="Plan:"
+  [plan_title]="Plan"
   [plan_latest]="latest"
   [plan_pinned]="pinned"
   [plan_kept]="already installed, kept"
@@ -180,41 +213,40 @@ MSG_EN=(
   [hint_yn]="[Y/n]"
   [hint_ny]="[y/N]"
   [sudo_prompt]="Asking for your sudo password once so the install can run unattended"
-  [base_update]="Updating apt and installing base packages"
-  [base_dev]="Installing build tools and utilities"
+  [base_update]="Base packages"
+  [base_dev]="Build tools and utilities"
   [fastfetch_already]="fastfetch already installed, skipping"
-  [fastfetch_install]="Installing fastfetch"
-  [fastfetch_fallback]="Not available in apt, downloading the .deb from GitHub..."
+  [fastfetch_install]="fastfetch"
+  [fastfetch_fallback]="fastfetch (.deb from GitHub)"
   [fastfetch_arch]="No fastfetch fallback for this architecture: %s"
   [omz_already]="Oh My Zsh already installed, skipping"
-  [omz_install]="Installing Oh My Zsh"
-  [plugins_clone]="Cloning plugins and theme"
-  [font_install]="Installing MesloLGS NF font"
+  [omz_install]="Oh My Zsh"
+  [plugins_clone]="Plugins and theme"
+  [plugin_exists]="already there: %s"
+  [font_install]="MesloLGS NF font"
   [font_gnome]="GNOME Terminal font configured."
   [font_manual]="Set the 'MesloLGS NF' font in your terminal preferences."
   [zshrc_write]="Writing ~/.zshrc"
   [zshrc_backup]="Backup saved to %s"
-  [shell_set]="Setting zsh as the default shell"
+  [shell_set]="Default shell"
   [shell_done]="Default shell changed to %s"
   [shell_already]="zsh is already the default shell"
-  [python_install]="Installing Python 3, pip, venv and pipx"
-  [node_install]="Installing nvm %s and Node.js (%s)"
+  [python_install]="Python"
+  [node_install]="Node.js (nvm %s, target: %s)"
   [nvm_already]="nvm already installed, skipping"
-  [corepack_warn]="corepack not enabled (fine, install pnpm/yarn later if you need them)"
   [docker_already]="Docker already installed, skipping install"
-  [docker_install]="Installing Docker Engine"
-  [docker_service_warn]="Could not enable the Docker service via systemd."
+  [docker_install]="Docker"
+  [docker_service]="Enabling the Docker service"
   [docker_group]="User %s added to the docker group (takes effect after logout/login)."
   [vscode_already]="VS Code already installed, skipping install"
-  [vscode_install]="Installing VS Code"
-  [vscode_ext]="Installing VS Code extensions"
-  [ext_ok]="ok: %s"
-  [ext_fail]="failed: %s (install it later from inside VS Code)"
+  [vscode_install]="Visual Studio Code"
+  [vscode_ext]="VS Code extensions"
+  [ext_install]="Extension %s"
   [gh_already]="GitHub CLI already installed, skipping"
-  [gh_install]="Installing GitHub CLI"
-  [git_config]="Configuring Git"
+  [gh_install]="GitHub CLI"
+  [git_config]="Git"
   [git_skip_warn]="Git name/email not set. Later, run: git config --global user.name / user.email"
-  [ssh_generating]="Generating SSH key (it will ask for a passphrase; leaving it empty is allowed)"
+  [ssh_generating]="SSH key (it will ask for a passphrase; leaving it empty is allowed)"
   [ssh_exists]="SSH key already exists, skipping"
   [ssh_pub]="Public key (paste it at github.com/settings/keys):"
   [summary_title]="Installed versions"
@@ -231,7 +263,7 @@ MSG_EN=(
   [L_disk]="Disk"
   [L_uptime]="Uptime"
   [L_used_of]="used of"
-  [help]="Usage: bash setup-dev-ubuntu.sh [options]\n\nOptions:\n  --lang <en-US|pt-BR>    Choose the language (skips the menu)\n  --components <list>     Comma-separated: terminal,base,git,gh,python,node,docker,vscode\n                          (skips the selection menu)\n  -y, --yes               Do not ask questions; use defaults and environment variables\n  -h, --help              Show this help\n\nEnvironment variables:\n  SETUP_LANG, GIT_NAME, GIT_EMAIL\n  NODE_VERSION, DOCKER_VERSION, CODE_VERSION, GH_VERSION, PYTHON_VERSION, NVM_VERSION\n  INSTALL_<COMPONENT>=true|false   (e.g. INSTALL_DOCKER=false)\n\nVersions accept partial input, e.g. NODE_VERSION=24 or DOCKER_VERSION=27.3\n"
+  [help]="Usage: bash setup-dev-ubuntu.sh [options]\n\nOptions:\n  --lang <en-US|pt-BR>    Choose the language (skips the menu)\n  --components <list>     Comma-separated: terminal,base,git,gh,python,node,docker,vscode\n                          (skips the selection menu)\n  --plain                 Simple numbered prompts instead of arrow-key menus\n  -y, --yes               Do not ask questions; use defaults and environment variables\n  -h, --help              Show this help\n\nEnvironment variables:\n  SETUP_LANG, GIT_NAME, GIT_EMAIL, NO_COLOR\n  NODE_VERSION, DOCKER_VERSION, CODE_VERSION, GH_VERSION, PYTHON_VERSION, NVM_VERSION\n  INSTALL_<COMPONENT>=true|false   (e.g. INSTALL_DOCKER=false)\n\nVersions accept partial input, e.g. NODE_VERSION=24 or DOCKER_VERSION=27.3\n"
 )
 
 MSG_PT=(
@@ -246,10 +278,20 @@ MSG_PT=(
   [sel_help]="Digite os números para marcar/desmarcar (ex.: 2 5), 'all', 'none', ou só Enter para continuar."
   [sel_invalid]="Escolha inválida: %s"
   [sel_none]="Nada selecionado. Nada a fazer."
+  [sel_summary]="Selecionado: %s"
   [comp_unknown]="Componente desconhecido: %s (válidos: %s)"
   [lbl_what]="O que é"
   [lbl_why]="Por quê"
   [tag_installed]="instalado: %s"
+  [tui_help_multi]="Setas cima/baixo mover  |  Espaço marca/desmarca  |  a todos  |  n nenhum  |  Enter confirma"
+  [tui_help_single]="Setas cima/baixo mover  |  Enter seleciona"
+  [opt_yes]="Sim"
+  [opt_no]="Não"
+  [log_path]="Log detalhado: %s"
+  [step_failed]="Falhou: %s"
+  [step_failed_hint]="Últimas linhas do log (log completo: %s):"
+  [apt_update]="Atualizando a lista de pacotes"
+  [inst_pkgs]="Instalando %s"
 
   [c_terminal_name]="Experiência de shell (zsh + Oh My Zsh + Powerlevel10k)"
   [c_terminal_what]="zsh como shell padrão com o framework Oh My Zsh, sugestões automáticas, destaque de sintaxe, menu de autocompletar ao vivo, o tema Powerlevel10k, a fonte de ícones MesloLGS NF e uma mensagem de boas-vindas com info do sistema (fastfetch)."
@@ -277,6 +319,9 @@ MSG_PT=(
   [c_vscode_why]="Editor popular e extensível, com ótimo suporte a JavaScript, Python, Docker e Git. A versão pode ser escolhida."
 
   [ask_versions]="Quer escolher versões específicas? (padrão: a versão estável mais recente de tudo)"
+  [ver_menu_title]="Versão de %s"
+  [ver_opt_other]="Outra... (digitar número ou nome da versão)"
+  [ver_recommended]="recomendada"
   [ver_hint]="%s: Enter para '%s', digite um número ou nome de versão (ex.: %s), ou 'list' para ver as disponíveis."
   [ver_list_title]="Versões disponíveis (mais novas primeiro):"
   [ver_none]="Nenhuma versão encontrada. O repositório está acessível?"
@@ -285,14 +330,14 @@ MSG_PT=(
   [ver_fail]="Não consegui resolver a versão de %s: '%s'."
   [node_offline]="Não consegui acessar nodejs.org para validar versões; '%s' será repassado direto ao nvm."
   [nvm_fallback]="Não consegui consultar a última versão do nvm; usando %s."
-  [python_ppa]="O Python %s não está nos repositórios padrão; adicionando o PPA deadsnakes."
+  [python_ppa]="Adicionando o PPA deadsnakes (o Python %s não está nos repositórios padrão)"
   [python_unavailable]="O Python %s não está disponível."
   [python_list_note]="Outras versões (ex.: 3.13) vêm do PPA deadsnakes, adicionado automaticamente quando você digita uma delas."
   [python_extra]="Python %s instalado ao lado do Python do sistema (não o substitui). Use: python%s -m venv .venv"
-  [repo_prep]="Adicionando o repositório apt do %s para ler as versões disponíveis"
+  [repo_prep]="Adicionando o repositório apt do %s"
   [prereqs]="Instalando pré-requisitos (curl, gnupg, software-properties-common)"
   [installed_keep]="%s já está instalado (%s); mantendo."
-  [plan_title]="Plano:"
+  [plan_title]="Plano"
   [plan_latest]="mais recente"
   [plan_pinned]="fixada"
   [plan_kept]="já instalado, mantido"
@@ -307,41 +352,40 @@ MSG_PT=(
   [hint_yn]="[S/n]"
   [hint_ny]="[s/N]"
   [sudo_prompt]="Pedindo a senha do sudo uma vez para a instalação rodar sem interrupções"
-  [base_update]="Atualizando o apt e instalando pacotes base"
-  [base_dev]="Instalando ferramentas de build e utilitários"
+  [base_update]="Pacotes base"
+  [base_dev]="Ferramentas de build e utilitários"
   [fastfetch_already]="fastfetch já instalado, pulando"
-  [fastfetch_install]="Instalando fastfetch"
-  [fastfetch_fallback]="Não achei no apt, baixando o .deb do GitHub..."
+  [fastfetch_install]="fastfetch"
+  [fastfetch_fallback]="fastfetch (.deb do GitHub)"
   [fastfetch_arch]="Sem fallback do fastfetch para esta arquitetura: %s"
   [omz_already]="Oh My Zsh já instalado, pulando"
-  [omz_install]="Instalando Oh My Zsh"
-  [plugins_clone]="Clonando plugins e tema"
-  [font_install]="Instalando a fonte MesloLGS NF"
+  [omz_install]="Oh My Zsh"
+  [plugins_clone]="Plugins e tema"
+  [plugin_exists]="já existe: %s"
+  [font_install]="Fonte MesloLGS NF"
   [font_gnome]="Fonte do GNOME Terminal configurada."
   [font_manual]="Defina a fonte 'MesloLGS NF' nas preferências do seu terminal."
   [zshrc_write]="Escrevendo ~/.zshrc"
   [zshrc_backup]="Backup salvo em %s"
-  [shell_set]="Definindo o zsh como shell padrão"
+  [shell_set]="Shell padrão"
   [shell_done]="Shell padrão alterado para %s"
   [shell_already]="O zsh já é o shell padrão"
-  [python_install]="Instalando Python 3, pip, venv e pipx"
-  [node_install]="Instalando nvm %s e Node.js (%s)"
+  [python_install]="Python"
+  [node_install]="Node.js (nvm %s, alvo: %s)"
   [nvm_already]="nvm já instalado, pulando"
-  [corepack_warn]="corepack não habilitado (tudo bem, instale pnpm/yarn depois se precisar)"
   [docker_already]="Docker já instalado, pulando a instalação"
-  [docker_install]="Instalando Docker Engine"
-  [docker_service_warn]="Não consegui habilitar o serviço do Docker via systemd."
+  [docker_install]="Docker"
+  [docker_service]="Habilitando o serviço do Docker"
   [docker_group]="Usuário %s adicionado ao grupo docker (vale depois de logout/login)."
   [vscode_already]="VS Code já instalado, pulando a instalação"
-  [vscode_install]="Instalando VS Code"
-  [vscode_ext]="Instalando extensões do VS Code"
-  [ext_ok]="ok: %s"
-  [ext_fail]="falhou: %s (instale depois pelo VS Code)"
+  [vscode_install]="Visual Studio Code"
+  [vscode_ext]="Extensões do VS Code"
+  [ext_install]="Extensão %s"
   [gh_already]="GitHub CLI já instalado, pulando"
-  [gh_install]="Instalando GitHub CLI"
-  [git_config]="Configurando o Git"
+  [gh_install]="GitHub CLI"
+  [git_config]="Git"
   [git_skip_warn]="Nome/e-mail do Git não definidos. Depois, rode: git config --global user.name / user.email"
-  [ssh_generating]="Gerando chave SSH (vai pedir uma senha; deixar vazio é permitido)"
+  [ssh_generating]="Chave SSH (vai pedir uma senha; deixar vazio é permitido)"
   [ssh_exists]="Chave SSH já existe, pulando"
   [ssh_pub]="Chave pública (cole em github.com/settings/keys):"
   [summary_title]="Versões instaladas"
@@ -358,7 +402,7 @@ MSG_PT=(
   [L_disk]="Disco"
   [L_uptime]="Uptime"
   [L_used_of]="usados de"
-  [help]="Uso: bash setup-dev-ubuntu.sh [opções]\n\nOpções:\n  --lang <en-US|pt-BR>    Escolhe o idioma (pula o menu)\n  --components <lista>    Separados por vírgula: terminal,base,git,gh,python,node,docker,vscode\n                          (pula o menu de seleção)\n  -y, --yes               Não faz perguntas; usa padrões e variáveis de ambiente\n  -h, --help              Mostra esta ajuda\n\nVariáveis de ambiente:\n  SETUP_LANG, GIT_NAME, GIT_EMAIL\n  NODE_VERSION, DOCKER_VERSION, CODE_VERSION, GH_VERSION, PYTHON_VERSION, NVM_VERSION\n  INSTALL_<COMPONENTE>=true|false   (ex.: INSTALL_DOCKER=false)\n\nAs versões aceitam entrada parcial, ex.: NODE_VERSION=24 ou DOCKER_VERSION=27.3\n"
+  [help]="Uso: bash setup-dev-ubuntu.sh [opções]\n\nOpções:\n  --lang <en-US|pt-BR>    Escolhe o idioma (pula o menu)\n  --components <lista>    Separados por vírgula: terminal,base,git,gh,python,node,docker,vscode\n                          (pula o menu de seleção)\n  --plain                 Perguntas numeradas simples em vez de menus com setas\n  -y, --yes               Não faz perguntas; usa padrões e variáveis de ambiente\n  -h, --help              Mostra esta ajuda\n\nVariáveis de ambiente:\n  SETUP_LANG, GIT_NAME, GIT_EMAIL, NO_COLOR\n  NODE_VERSION, DOCKER_VERSION, CODE_VERSION, GH_VERSION, PYTHON_VERSION, NVM_VERSION\n  INSTALL_<COMPONENTE>=true|false   (ex.: INSTALL_DOCKER=false)\n\nAs versões aceitam entrada parcial, ex.: NODE_VERSION=24 ou DOCKER_VERSION=27.3\n"
 )
 
 # t <key> [printf args...]  -> localized message (falls back to English)
@@ -376,23 +420,225 @@ t() {
 }
 
 # ===============================================================
-# Helpers
+# Terminal setup, output helpers
 # ===============================================================
-log()  { echo -e "\n\033[1;36m==>\033[0m \033[1m$*\033[0m"; }
-warn() { echo -e "\033[1;33m[!]\033[0m $*"; }
+init_term() {
+  local rows=0 cols=0
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) UTF=true ;;
+  esac
+
+  if [[ -t 1 && "${TERM:-dumb}" != dumb ]]; then
+    SPIN=true
+    if [[ -z "${NO_COLOR:-}" ]]; then
+      C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+      C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YELLOW=$'\033[33m'
+    fi
+  fi
+
+  # Arrow-key menus need: a real terminal, enough room, and no --plain/--yes
+  if [[ "$INTERACTIVE" == true && "$SPIN" == true && "$PLAIN" != true && "$ASSUME_YES" != true ]]; then
+    read -r rows cols < <(stty size </dev/tty 2>/dev/null || echo "0 0")
+    TUI_COLS="$cols"
+    if (( rows >= 24 && cols >= 60 )); then TUI=true; fi
+  fi
+
+  if [[ "$UTF" == true ]]; then
+    M_OK="✔"; M_FAIL="✖"; M_WARN="⚠"; M_PTR="❯"; M_RULE="─"
+    SPIN_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  fi
+}
+
+log()  { printf '\n%s▶ %s%s\n' "${C_BOLD}${C_CYAN}" "$*" "$C_RESET"; }
+warn() { printf '%s%s%s %s\n' "$C_YELLOW" "$M_WARN" "$C_RESET" "$*"; }
+ok()   { printf '  %s%s%s %s\n' "$C_GREEN" "$M_OK" "$C_RESET" "$*"; }
 L()    { log "$(t "$@")"; }
 W()    { warn "$(t "$@")"; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 
 cleanup() {
   if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi
+  if [[ "$INTERACTIVE" == true && "$SPIN" == true ]]; then
+    printf '\033[?25h'
+    stty sane </dev/tty 2>/dev/null || true
+  fi
   local f
   for f in "${TMP_FILES[@]:-}"; do
     if [[ -n "$f" ]]; then rm -f "$f"; fi
   done
 }
 
-# ask "prompt" "default" -> prints the answer (default if empty)
+init_log() {
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/setup-dev-ubuntu"
+  mkdir -p "$dir"
+  LOG_FILE="$dir/install-$(date +%Y%m%d-%H%M%S).log"
+  : > "$LOG_FILE"
+}
+
+# ---------------------------------------------------------------
+# run "description" command args...   (output goes to the log)
+#   shows a spinner, then "✔ description (Ns)"; on failure shows the log tail and exits
+# run_soft: same, but a failure only warns and returns the status
+# ---------------------------------------------------------------
+_run_impl() {
+  local mode="$1" desc="$2" pid status=0 start="$SECONDS" i=0 n elapsed suffix=""
+  shift 2
+  n="${#SPIN_FRAMES[@]}"
+  { printf '\n### %s\n$ %s\n' "$desc" "$*"; } >> "$LOG_FILE"
+
+  "$@" >> "$LOG_FILE" 2>&1 < /dev/null &
+  pid=$!
+
+  if [[ "$SPIN" == true ]]; then
+    printf '\033[?25l'
+    while kill -0 "$pid" 2>/dev/null; do
+      printf '\r\033[K  %s%s%s %s' "$C_CYAN" "${SPIN_FRAMES[$((i % n))]}" "$C_RESET" "$desc"
+      i=$((i + 1))
+      sleep 0.1
+    done
+    printf '\r\033[K\033[?25h'
+  fi
+
+  wait "$pid" || status=$?
+  elapsed=$((SECONDS - start))
+  if (( elapsed >= 3 )); then suffix=" ${C_DIM}(${elapsed}s)${C_RESET}"; fi
+
+  if (( status == 0 )); then
+    printf '  %s%s%s %s%s\n' "$C_GREEN" "$M_OK" "$C_RESET" "$desc" "$suffix"
+    return 0
+  fi
+
+  if [[ "$mode" == soft ]]; then
+    printf '  %s%s%s %s %s(skipped)%s\n' "$C_YELLOW" "$M_WARN" "$C_RESET" "$desc" "$C_DIM" "$C_RESET"
+    return "$status"
+  fi
+
+  printf '  %s%s%s %s\n' "$C_RED" "$M_FAIL" "$C_RESET" "$(t step_failed "$desc")" >&2
+  printf '\n%s\n' "$(t step_failed_hint "$LOG_FILE")" >&2
+  # only the section of the step that failed (each step starts with a "### " marker)
+  awk '/^### / {n = NR} {l[NR] = $0} END {for (i = n; i <= NR; i++) print l[i]}' "$LOG_FILE" \
+    | tail -n 20 | sed 's/^/    /' >&2
+  exit 1
+}
+run()      { _run_impl hard "$@"; }
+run_soft() { _run_impl soft "$@"; }
+
+# ===============================================================
+# Interactive input: arrow-key engine (with plain fallbacks)
+# ===============================================================
+read_key() {
+  local k="" rest=""
+  IFS= read -rsn1 k </dev/tty || { KEY="eof"; return 0; }
+  if [[ "$k" == $'\033' ]]; then
+    IFS= read -rsn2 -t 0.05 rest </dev/tty || true
+    case "$rest" in
+      '[A'|'OA') KEY="up" ;;
+      '[B'|'OB') KEY="down" ;;
+      '[C'|'OC') KEY="right" ;;
+      '[D'|'OD') KEY="left" ;;
+      *)         KEY="esc" ;;
+    esac
+  elif [[ -z "$k" ]]; then
+    KEY="enter"
+  elif [[ "$k" == " " ]]; then
+    KEY="space"
+  else
+    KEY="$k"
+  fi
+}
+
+# vshow "5:27.3.1-1~ubuntu.24.04~noble" -> "27.3.1"  (display only; installs use the full string)
+vshow() {
+  local v="$1"
+  if [[ "$v" == *:* || "$v" == *~* || "$v" == *-* ]]; then
+    v="${v#*:}"
+    v="${v%%-*}"
+  fi
+  printf '%s' "$v"
+}
+
+# tui_help KEY -> help line, with real arrows when the terminal handles UTF-8
+tui_help() {
+  local h
+  h="$(t "$1")"
+  if [[ "$UTF" == true ]]; then
+    h="${h/Up\/Down/↑/↓}"
+    h="${h/Setas cima\/baixo/↑/↓}"
+  fi
+  printf '%s' "$h"
+}
+
+hr() {
+  local n="$1" s
+  printf -v s '%*s' "$n" ''
+  printf '%s' "${s// /$M_RULE}"
+}
+
+# tui_loop RENDER_FN COUNT [KEY_FN]
+#   RENDER_FN prints one frame (reads the global CUR).
+#   KEY_FN (optional) gets any other key; return 0 = finish, 1 = keep going.
+#   The frame is erased when the loop ends, so the screen stays clean.
+tui_loop() {
+  local render="$1" count="$2" keyfn="${3:-}" frame prev=0 finished=false
+  printf '\033[?25l'
+  while [[ "$finished" != true ]]; do
+    frame="$("$render")"
+    if (( prev > 0 )); then printf '\033[%dA\033[J' "$prev"; fi
+    printf '%s\n' "$frame"
+    prev="$(printf '%s\n' "$frame" | wc -l)"
+    prev="${prev// /}"
+    read_key
+    case "$KEY" in
+      up|k)   CUR=$(( (CUR + count - 1) % count )) ;;
+      down|j) CUR=$(( (CUR + 1) % count )) ;;
+      enter|eof) finished=true ;;
+      *)
+        if [[ -n "$keyfn" ]] && "$keyfn" "$KEY"; then finished=true; fi
+        ;;
+    esac
+  done
+  if (( prev > 0 )); then printf '\033[%dA\033[J' "$prev"; fi
+  printf '\033[?25h'
+}
+
+# ---- single choice ---------------------------------------------
+render_single() {
+  local i line
+  printf '%s%s%s\n' "$C_BOLD" "$SINGLE_TITLE" "$C_RESET"
+  printf '%s%s%s\n' "$C_DIM" "$(tui_help tui_help_single)" "$C_RESET"
+  for i in "${!SINGLE_OPTS[@]}"; do
+    line="${SINGLE_OPTS[$i]:0:$((TUI_COLS - 8))}"
+    if (( i == CUR )); then
+      printf '  %s%s %s%s\n' "${C_CYAN}${C_BOLD}" "$M_PTR" "$line" "$C_RESET"
+    else
+      printf '    %s\n' "$line"
+    fi
+  done
+}
+
+single_keyfn() {
+  local k="$1" n="${#SINGLE_OPTS[@]}"
+  if [[ "$SINGLE_YESNO" == true ]]; then
+    case "${k,,}" in
+      y|s) CUR=0; return 0 ;;
+      n)   CUR=1; return 0 ;;
+    esac
+  fi
+  if [[ "$k" =~ ^[1-9]$ ]] && (( k <= n )); then CUR=$((k - 1)); return 0; fi
+  return 1
+}
+
+# choose "title" default_index option...   -> sets CHOICE (index)
+choose() {
+  SINGLE_TITLE="$1"
+  CUR="$2"
+  shift 2
+  SINGLE_OPTS=("$@")
+  tui_loop render_single "${#SINGLE_OPTS[@]}" single_keyfn
+  CHOICE="$CUR"
+}
+
+# ask "prompt" "default" -> prints the answer (default if empty)   [text input]
 ask() {
   local prompt="$1" default="${2:-}" reply=""
   if [[ -n "$default" ]]; then prompt="$prompt [$default]"; fi
@@ -402,27 +648,27 @@ ask() {
 
 # ask_yn "prompt" Y|N -> exit status 0 = yes
 ask_yn() {
-  local prompt="$1" def="${2:-Y}" reply="" hint
-  if [[ "$def" == "Y" ]]; then hint="$(t hint_yn)"; else hint="$(t hint_ny)"; fi
+  local prompt="$1" def="${2:-Y}" reply="" hint idx
   if [[ "$INTERACTIVE" != true || "$ASSUME_YES" == true ]]; then
     [[ "$def" == "Y" ]]
     return
   fi
+  if [[ "$TUI" == true ]]; then
+    if [[ "$def" == "Y" ]]; then idx=0; else idx=1; fi
+    SINGLE_YESNO=true
+    choose "$prompt" "$idx" "$(t opt_yes)" "$(t opt_no)"
+    SINGLE_YESNO=false
+    ok "$prompt ${C_BOLD}${SINGLE_OPTS[$CHOICE]}${C_RESET}"
+    [[ "$CHOICE" == 0 ]]
+    return
+  fi
+  if [[ "$def" == "Y" ]]; then hint="$(t hint_yn)"; else hint="$(t hint_ny)"; fi
   read -r -p "$prompt $hint " reply </dev/tty || reply=""
   reply="${reply:-$def}"
   case "${reply,,}" in
     y|yes|s|sim) return 0 ;;
     *) return 1 ;;
   esac
-}
-
-clone_if_missing() {
-  local url="$1" dest="$2"
-  if [[ -d "$dest" ]]; then
-    echo "Already exists / Já existe: $dest"
-  else
-    git clone --depth 1 "$url" "$dest"
-  fi
 }
 
 ensure_sudo() {
@@ -442,9 +688,8 @@ ensure_sudo() {
 ensure_prereqs() {
   if [[ "$PREREQS_DONE" == true ]]; then return 0; fi
   ensure_sudo
-  L prereqs
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq curl ca-certificates gnupg software-properties-common
+  run "$(t apt_update)" sudo apt-get update -qq
+  run "$(t prereqs)" sudo apt-get install -y -qq curl ca-certificates gnupg software-properties-common
   PREREQS_DONE=true
 }
 
@@ -478,6 +723,7 @@ parse_args() {
       --lang=*)       SETUP_LANG="${1#*=}"; shift ;;
       --components)   COMPONENTS_ARG="${2:-}"; shift 2 || shift ;;
       --components=*) COMPONENTS_ARG="${1#*=}"; shift ;;
+      --plain)        PLAIN=true; shift ;;
       -y|--yes)       ASSUME_YES=true; shift ;;
       -h|--help)      SHOW_HELP=true; shift ;;
       *) echo "Unknown option / Opção desconhecida: $1" >&2; exit 1 ;;
@@ -520,15 +766,20 @@ select_language() {
     if [[ "$default" == "pt-BR" ]]; then defnum=2; else defnum=1; fi
 
     if [[ "$INTERACTIVE" == true && "$ASSUME_YES" != true ]]; then
-      while [[ -z "$chosen" ]]; do
-        echo
-        echo "Select your language / Selecione o idioma:"
-        echo "  1) English (en-US)"
-        echo "  2) Português (pt-BR)"
-        read -r -p "> [$defnum]: " reply </dev/tty || reply=""
-        reply="${reply:-$defnum}"
-        chosen="$(normalize_lang "$reply")"
-      done
+      if [[ "$TUI" == true ]]; then
+        choose "Select your language / Selecione o idioma" "$((defnum - 1))" "English (en-US)" "Português (pt-BR)"
+        if [[ "$CHOICE" == 1 ]]; then chosen="pt-BR"; else chosen="en-US"; fi
+      else
+        while [[ -z "$chosen" ]]; do
+          echo
+          echo "Select your language / Selecione o idioma:"
+          echo "  1) English (en-US)"
+          echo "  2) Português (pt-BR)"
+          read -r -p "> [$defnum]: " reply </dev/tty || reply=""
+          reply="${reply:-$defnum}"
+          chosen="$(normalize_lang "$reply")"
+        done
+      fi
     else
       chosen="$default"
     fi
@@ -552,7 +803,7 @@ preflight() {
 }
 
 # ===============================================================
-# Component selection menu
+# Component selection
 # ===============================================================
 installed_info() {
   case "$1" in
@@ -575,9 +826,74 @@ is_kept() {
   esac
 }
 
-# render_menu [full|compact]  (full shows What/Why for each item)
-render_menu() {
-  local mode="${1:-full}" i=0 id mark tag name
+# ---- arrow-key checklist ------------------------------------------
+render_components() {
+  local i id mark line w j panel
+  local -a plines=()
+  w=$((TUI_COLS - 6))
+  if (( w > 88 )); then w=88; fi
+
+  printf '%s%s%s\n' "$C_BOLD" "$(t sel_title)" "$C_RESET"
+  printf '%s%s%s\n\n' "$C_DIM" "$(tui_help tui_help_multi)" "$C_RESET"
+
+  for i in "${!COMPONENTS[@]}"; do
+    id="${COMPONENTS[$i]}"
+    if [[ "${SEL[$id]}" == true ]]; then mark="${C_GREEN}${M_ON}${C_RESET}"; else mark="$M_OFF"; fi
+    line="$(t "c_${id}_name")"
+    if [[ -n "${INSTALLED_TAG[$id]}" ]]; then line="$line  ($(t tag_installed "${INSTALLED_TAG[$id]}"))"; fi
+    line="${line:0:$((TUI_COLS - 12))}"
+    if (( i == CUR )); then
+      printf '  %s%s%s %s %s%s%s\n' "${C_CYAN}${C_BOLD}" "$M_PTR" "$C_RESET" "$mark" "$C_BOLD" "$line" "$C_RESET"
+    else
+      printf '    %s %s\n' "$mark" "$line"
+    fi
+  done
+
+  id="${COMPONENTS[$CUR]}"
+  printf '  %s%s%s\n' "$C_DIM" "$(hr $((w)))" "$C_RESET"
+  panel="$(printf '%s: %s\n%s: %s' "$(t lbl_what)" "$(t "c_${id}_what")" "$(t lbl_why)" "$(t "c_${id}_why")" | fold -s -w "$w")"
+  mapfile -t plines <<<"$panel"
+  for (( j = 0; j < PANEL_H; j++ )); do
+    printf '  %s\n' "${plines[$j]:-}"
+  done
+}
+
+components_keyfn() {
+  local id
+  case "$1" in
+    space)
+      id="${COMPONENTS[$CUR]}"
+      if [[ "${SEL[$id]}" == true ]]; then SEL[$id]=false; else SEL[$id]=true; fi ;;
+    a|A) for id in "${COMPONENTS[@]}"; do SEL[$id]=true; done ;;
+    n|N) for id in "${COMPONENTS[@]}"; do SEL[$id]=false; done ;;
+  esac
+  return 1
+}
+
+selected_names() {
+  local id joined=""
+  local -a names=()
+  for id in "${COMPONENTS[@]}"; do
+    if [[ "${SEL[$id]}" == true ]]; then names+=("$id"); fi
+  done
+  if (( ${#names[@]} > 0 )); then
+    printf -v joined '%s, ' "${names[@]}"
+    joined="${joined%, }"
+  fi
+  printf '%s' "$joined"
+}
+
+select_components_tui() {
+  local id
+  for id in "${COMPONENTS[@]}"; do INSTALLED_TAG[$id]="$(installed_info "$id" || true)"; done
+  CUR=0
+  tui_loop render_components "${#COMPONENTS[@]}" components_keyfn
+  ok "$(t sel_summary "$(selected_names)")"
+}
+
+# ---- plain numbered fallback ---------------------------------------
+render_menu_plain() {
+  local i=0 id mark tag name
   echo
   echo "$(t sel_title)"
   echo
@@ -591,16 +907,16 @@ render_menu() {
     else
       printf '  %s %d) %s\n' "$mark" "$i" "$name"
     fi
-    if [[ "$mode" == full ]]; then
+    if [[ "${1:-full}" == full ]]; then
       printf '%s: %s\n' "$(t lbl_what)" "$(t "c_${id}_what")" | fold -s -w 72 | sed 's/^/        /'
       printf '%s: %s\n' "$(t lbl_why)" "$(t "c_${id}_why")"  | fold -s -w 72 | sed 's/^/        /'
       echo
     fi
   done
-  if [[ "$mode" != full ]]; then echo; fi
+  if [[ "${1:-full}" != full ]]; then echo; fi
 }
 
-menu_apply() {
+menu_apply_plain() {
   local tok="${1,,}" id
   case "$tok" in
     all)  for id in "${COMPONENTS[@]}"; do SEL[$id]=true; done ;;
@@ -617,18 +933,22 @@ menu_apply() {
   esac
 }
 
-select_components() {
-  if [[ -n "$COMPONENTS_ARG" ]]; then return 0; fi
-  if [[ "$INTERACTIVE" != true || "$ASSUME_YES" == true ]]; then return 0; fi
+select_components_plain() {
   local line tok mode=full
   while true; do
-    render_menu "$mode"
+    render_menu_plain "$mode"
     mode=compact
     echo "$(t sel_help)"
     read -r -p "> " line </dev/tty || line=""
     if [[ -z "${line// /}" ]]; then break; fi
-    for tok in $line; do menu_apply "$tok"; done
+    for tok in $line; do menu_apply_plain "$tok"; done
   done
+}
+
+select_components() {
+  if [[ -n "$COMPONENTS_ARG" ]]; then return 0; fi
+  if [[ "$INTERACTIVE" != true || "$ASSUME_YES" == true ]]; then return 0; fi
+  if [[ "$TUI" == true ]]; then select_components_tui; else select_components_plain; fi
 }
 
 any_selected() {
@@ -719,10 +1039,8 @@ apt_list_versions() {
   if [[ -z "$out" ]]; then echo "  $(t ver_none)"; else sed 's/^/  /' <<<"$out"; fi
 }
 
-prepare_docker_repo() {
-  if [[ -f /etc/apt/sources.list.d/docker.sources ]]; then return 0; fi
-  ensure_prereqs
-  L repo_prep "Docker"
+# Repository setup helpers (run in the background by `run`, so they only do side effects)
+_docker_repo_setup() {
   local codename
   codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")"
   sudo install -m 0755 -d /etc/apt/keyrings
@@ -737,13 +1055,9 @@ Architectures: ${ARCH}
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
   sudo apt-get update -qq
-  REPO_ADDED=true
 }
 
-prepare_vscode_repo() {
-  if [[ -f /etc/apt/sources.list.d/vscode.sources ]]; then return 0; fi
-  ensure_prereqs
-  L repo_prep "VS Code"
+_vscode_repo_setup() {
   curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft.gpg >/dev/null
   sudo tee /etc/apt/sources.list.d/vscode.sources >/dev/null <<'EOF'
 Types: deb
@@ -756,13 +1070,9 @@ EOF
   # Stops the package from adding the same repository again (apt duplicate warning)
   echo "code code/add-microsoft-repo boolean false" | sudo debconf-set-selections
   sudo apt-get update -qq
-  REPO_ADDED=true
 }
 
-prepare_gh_repo() {
-  if [[ -f /etc/apt/sources.list.d/github-cli.list ]]; then return 0; fi
-  ensure_prereqs
-  L repo_prep "GitHub CLI"
+_gh_repo_setup() {
   sudo install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
@@ -770,6 +1080,26 @@ prepare_gh_repo() {
   echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
     | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
   sudo apt-get update -qq
+}
+
+prepare_docker_repo() {
+  if [[ -f /etc/apt/sources.list.d/docker.sources ]]; then return 0; fi
+  ensure_prereqs
+  run "$(t repo_prep "Docker")" _docker_repo_setup
+  REPO_ADDED=true
+}
+
+prepare_vscode_repo() {
+  if [[ -f /etc/apt/sources.list.d/vscode.sources ]]; then return 0; fi
+  ensure_prereqs
+  run "$(t repo_prep "VS Code")" _vscode_repo_setup
+  REPO_ADDED=true
+}
+
+prepare_gh_repo() {
+  if [[ -f /etc/apt/sources.list.d/github-cli.list ]]; then return 0; fi
+  ensure_prereqs
+  run "$(t repo_prep "GitHub CLI")" _gh_repo_setup
   REPO_ADDED=true
 }
 
@@ -909,10 +1239,19 @@ python_available() {
   [[ -n "$c" && "$c" != "(none)" ]]
 }
 
+python_local_minors() {
+  apt-cache pkgnames python3. 2>/dev/null | grep -E '^python3\.[0-9]+$' | sort -V -r | sed 's/^python//' || true
+}
+
+_python_ppa_add() {
+  sudo add-apt-repository -y ppa:deadsnakes/ppa
+  sudo apt-get update -qq
+}
+
 ver_prepare_python() { :; }
 
 ver_list_python() {
-  apt-cache pkgnames python3. 2>/dev/null | grep -E '^python3\.[0-9]+$' | sort -V -r | sed 's/^python/  /' || true
+  python_local_minors | sed 's/^/  /'
   echo
   echo "  $(t python_list_note)"
 }
@@ -928,9 +1267,7 @@ ver_resolve_python() {
   minor="$(python_normalize "$spec")" || return 1
   if ! python_available "$minor"; then
     ensure_prereqs
-    L python_ppa "$minor"
-    sudo add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1 || true
-    sudo apt-get update -qq || true
+    run_soft "$(t python_ppa "$minor")" _python_ppa_add || true
     REPO_ADDED=true
     if ! python_available "$minor"; then
       W python_unavailable "$minor"
@@ -954,12 +1291,16 @@ resolve_version() {
     ""|latest|system|default|lts|current) VPIN[$id]=false ;;
     *) VPIN[$id]=true ;;
   esac
-  echo "  $(t ver_resolved "$spec" "${VEXACT[$id]:-${VSPEC[$id]}}${VINFO[$id]:+ (${VINFO[$id]})}")"
+  local shown_spec="$spec" shown_exact="${VEXACT[$id]:-${VSPEC[$id]}}"
+  case "$id" in
+    docker|vscode|gh) shown_spec="$(vshow "$spec")"; shown_exact="$(vshow "$shown_exact")" ;;
+  esac
+  ok "${VLABEL[$id]}: $(t ver_resolved "$shown_spec" "${shown_exact}${VINFO[$id]:+ (${VINFO[$id]})}")"
 }
 
-prompt_version() {
+# ---- typed input (also the fallback for "Other...") ---------------
+prompt_version_typed() {
   local id="$1" spec def="${VSPEC[$1]}"
-  "ver_prepare_$id" || true
   while true; do
     echo
     echo "$(t ver_hint "${VLABEL[$id]}" "$def" "$(t "ver_ex_$id")")"
@@ -975,6 +1316,93 @@ prompt_version() {
     warn "$(t ver_no_match "$spec")"
     "ver_list_$id" | head -n 8
   done
+}
+
+# ---- arrow-key version list ---------------------------------------
+# Fills VOPT_LABELS / VOPT_SPECS with the options shown in the menu
+build_version_options() {
+  local id="$1" v base line pkg first=true count=0 ver name sysv
+  local -A seen=()
+  VOPT_LABELS=()
+  VOPT_SPECS=()
+  case "$id" in
+    node)
+      if node_load_index; then
+        line="$(node_resolve lts || true)"
+        if [[ -n "$line" ]]; then
+          VOPT_LABELS+=("lts  -  ${line%%$'\t'*} (LTS ${line#*$'\t'})  [$(t ver_recommended)]")
+        else
+          VOPT_LABELS+=("lts  [$(t ver_recommended)]")
+        fi
+        VOPT_SPECS+=("lts")
+        line="$(node_resolve latest || true)"
+        VOPT_LABELS+=("latest  -  ${line%%$'\t'*}")
+        VOPT_SPECS+=("latest")
+        while IFS=$'\t' read -r ver name; do
+          VOPT_LABELS+=("$ver (LTS $name)")
+          VOPT_SPECS+=("$ver")
+        done < <(awk -F'\t' '$2 != "-" && !seen[$2]++ {print $1 "\t" $2}' "$NODE_CATALOG" | tail -n +2 | head -n 4)
+      else
+        VOPT_LABELS=("lts  [$(t ver_recommended)]" "latest")
+        VOPT_SPECS=("lts" "latest")
+      fi
+      ;;
+    docker|vscode|gh)
+      case "$id" in docker) pkg="docker-ce" ;; vscode) pkg="code" ;; *) pkg="gh" ;; esac
+      while IFS= read -r v; do
+        base="${v#*:}"
+        base="${base%%-*}"
+        if [[ "$first" == true ]]; then
+          VOPT_LABELS+=("latest  -  $base  [$(t ver_recommended)]")
+          VOPT_SPECS+=("latest")
+          seen[$base]=1
+          first=false
+          continue
+        fi
+        if [[ -n "${seen[$base]:-}" ]]; then continue; fi
+        seen[$base]=1
+        VOPT_LABELS+=("$base")
+        VOPT_SPECS+=("$v")
+        count=$((count + 1))
+        if (( count >= 6 )); then break; fi
+      done < <(apt_candidates "$pkg")
+      if [[ "$first" == true ]]; then
+        VOPT_LABELS=("latest  [$(t ver_recommended)]")
+        VOPT_SPECS=("latest")
+      fi
+      ;;
+    python)
+      sysv="$(python3 --version 2>/dev/null | awk '{print $2}' || true)"
+      VOPT_LABELS+=("system  -  ${sysv:-python3}  [$(t ver_recommended)]")
+      VOPT_SPECS+=("system")
+      while IFS= read -r v; do
+        if [[ -z "$v" ]]; then continue; fi
+        VOPT_LABELS+=("$v")
+        VOPT_SPECS+=("$v")
+      done < <(python_local_minors | head -n 5)
+      ;;
+  esac
+}
+
+choose_version() {
+  local id="$1" other idx
+  build_version_options "$id"
+  VOPT_LABELS+=("$(t ver_opt_other)")
+  other=$(( ${#VOPT_LABELS[@]} - 1 ))
+  SINGLE_YESNO=false
+  choose "$(t ver_menu_title "${VLABEL[$id]}")" 0 "${VOPT_LABELS[@]}"
+  idx="$CHOICE"
+  if (( idx == other )); then
+    prompt_version_typed "$id"
+    return 0
+  fi
+  if ! resolve_version "$id" "${VOPT_SPECS[$idx]}"; then prompt_version_typed "$id"; fi
+}
+
+prompt_version() {
+  local id="$1"
+  "ver_prepare_$id" || true
+  if [[ "$TUI" == true ]]; then choose_version "$id"; else prompt_version_typed "$id"; fi
 }
 
 resolve_all_versions() {
@@ -1029,7 +1457,7 @@ plan_suffix() {
       if is_kept "$id"; then
         echo " - $(t plan_kept)"
       elif [[ "${VPIN[$id]}" == true ]]; then
-        echo " - ${VEXACT[$id]} ($(t plan_pinned))"
+        echo " - $(vshow "${VEXACT[$id]}") ($(t plan_pinned))"
       else
         echo " - $(t plan_latest)"
       fi ;;
@@ -1042,12 +1470,13 @@ plan_suffix() {
 show_plan() {
   local id
   echo
-  echo "$(t plan_title)"
+  printf '%s%s%s\n' "$C_BOLD" "$(t plan_title)" "$C_RESET"
   for id in "${COMPONENTS[@]}"; do
     if [[ "${SEL[$id]}" == true ]]; then
-      echo "  [x] $(t "c_${id}_name")$(plan_suffix "$id")"
+      printf '  %s%s%s %s%s\n' "$C_GREEN" "$M_OK" "$C_RESET" "$(t "c_${id}_name")" "$(plan_suffix "$id")"
     fi
   done
+  printf '%s  %s%s\n' "$C_DIM" "$(t log_path "$LOG_FILE")" "$C_RESET"
   echo
 }
 
@@ -1063,34 +1492,34 @@ hold_pinned() {
   fi
 }
 
+clone_if_missing() {
+  local url="$1" dest="$2"
+  if [[ -d "$dest" ]]; then
+    echo "  ${C_DIM}$(t plugin_exists "$(basename "$dest")")${C_RESET}"
+  else
+    run "$(basename "$dest")" git clone --depth 1 -q "$url" "$dest"
+  fi
+}
+
 install_base() {
   L base_update
-  sudo apt-get update
-  sudo apt-get install -y git curl wget unzip zip ca-certificates gnupg software-properties-common
+  run "$(t apt_update)" sudo apt-get update
+  run "$(t inst_pkgs "git, curl, wget, unzip, zip, gnupg")" \
+    sudo apt-get install -y git curl wget unzip zip ca-certificates gnupg software-properties-common
 }
 
 install_base_dev() {
   L base_dev
-  sudo apt-get install -y \
-    build-essential pkg-config libssl-dev \
-    jq ripgrep fd-find bat htop tree
+  run "$(t inst_pkgs "build-essential, jq, ripgrep, fd, bat, htop, tree")" \
+    sudo apt-get install -y build-essential pkg-config libssl-dev jq ripgrep fd-find bat htop tree
 }
 
-install_fastfetch() {
-  if has fastfetch; then
-    L fastfetch_already
-    return
-  fi
-  L fastfetch_install
-  if sudo apt-get install -y fastfetch 2>/dev/null; then
-    return
-  fi
-  echo "$(t fastfetch_fallback)"
+_fastfetch_deb() {
   local deb_arch=""
   case "$(uname -m)" in
     x86_64)  deb_arch="amd64" ;;
     aarch64) deb_arch="aarch64" ;;
-    *) W fastfetch_arch "$(uname -m)"; return ;;
+    *) echo "$(t fastfetch_arch "$(uname -m)")"; return 1 ;;
   esac
   curl -fL -o /tmp/fastfetch.deb \
     "https://github.com/fastfetch-cli/fastfetch/releases/latest/download/fastfetch-linux-${deb_arch}.deb"
@@ -1098,17 +1527,34 @@ install_fastfetch() {
   rm -f /tmp/fastfetch.deb
 }
 
-install_ohmyzsh() {
-  sudo apt-get install -y zsh fontconfig
-  if [[ -d "$ZSH_DIR" ]]; then
-    L omz_already
-  else
-    L omz_install
-    RUNZSH=no CHSH=no KEEP_ZSHRC=yes \
-      sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+install_fastfetch() {
+  if has fastfetch; then
+    echo "  ${C_DIM}$(t fastfetch_already)${C_RESET}"
+    return
   fi
+  # Ubuntu 24.04 does not ship fastfetch: check the repositories first, so the
+  # fallback is a normal path and not a scary "skipped" line
+  local cand
+  cand="$(apt-cache policy fastfetch 2>/dev/null | awk '/Candidate:/ {print $2}')"
+  if [[ -n "$cand" && "$cand" != "(none)" ]]; then
+    run "$(t inst_pkgs "$(t fastfetch_install)")" sudo apt-get install -y fastfetch
+  else
+    run "$(t inst_pkgs "$(t fastfetch_fallback)")" _fastfetch_deb
+  fi
+}
 
-  L plugins_clone
+_omz_installer() {
+  RUNZSH=no CHSH=no KEEP_ZSHRC=yes \
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+}
+
+install_ohmyzsh() {
+  run "$(t inst_pkgs "zsh, fontconfig")" sudo apt-get install -y zsh fontconfig
+  if [[ -d "$ZSH_DIR" ]]; then
+    echo "  ${C_DIM}$(t omz_already)${C_RESET}"
+  else
+    run "$(t inst_pkgs "$(t omz_install)")" _omz_installer
+  fi
   mkdir -p "$ZSH_CUSTOM_DIR/plugins" "$ZSH_CUSTOM_DIR/themes"
   clone_if_missing https://github.com/zsh-users/zsh-autosuggestions     "$ZSH_CUSTOM_DIR/plugins/zsh-autosuggestions"
   clone_if_missing https://github.com/zsh-users/zsh-syntax-highlighting "$ZSH_CUSTOM_DIR/plugins/zsh-syntax-highlighting"
@@ -1116,12 +1562,11 @@ install_ohmyzsh() {
   clone_if_missing https://github.com/romkatv/powerlevel10k             "$ZSH_CUSTOM_DIR/themes/powerlevel10k"
 }
 
-install_font() {
-  L font_install
+_font_download() {
   local font_dir="$HOME/.local/share/fonts"
   local base_url="https://github.com/romkatv/powerlevel10k-media/raw/master"
-  mkdir -p "$font_dir"
   local style file
+  mkdir -p "$font_dir"
   for style in "Regular" "Bold" "Italic" "Bold Italic"; do
     file="MesloLGS NF ${style}.ttf"
     if [[ ! -f "$font_dir/$file" ]]; then
@@ -1129,6 +1574,10 @@ install_font() {
     fi
   done
   fc-cache -f
+}
+
+install_font() {
+  run "$(t font_install)" _font_download
 
   # Best effort for GNOME Terminal; other terminals need manual configuration
   if has gsettings && gsettings list-schemas 2>/dev/null | grep -q "org.gnome.Terminal.ProfilesList"; then
@@ -1138,7 +1587,7 @@ install_font() {
       p="org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:${profile_id}/"
       gsettings set "$p" use-system-font false || true
       gsettings set "$p" font 'MesloLGS NF 12' || true
-      echo "$(t font_gnome)"
+      ok "$(t font_gnome)"
     fi
   else
     W font_manual
@@ -1147,84 +1596,95 @@ install_font() {
 
 install_python() {
   L python_install
-  sudo apt-get install -y python3 python3-pip python3-venv python3-dev pipx
   # Ubuntu 24.04 blocks global `pip install` (PEP 668).
   # Use a venv per project, and pipx for command-line tools.
+  run "$(t inst_pkgs "python3, pip, venv, pipx")" \
+    sudo apt-get install -y python3 python3-pip python3-venv python3-dev pipx
   local minor="${VEXACT[python]}"
   if [[ -n "$minor" ]]; then
-    sudo apt-get install -y "python${minor}" "python${minor}-venv" "python${minor}-dev"
-    echo "$(t python_extra "$minor" "$minor")"
+    run "$(t inst_pkgs "Python $minor")" \
+      sudo apt-get install -y "python${minor}" "python${minor}-venv" "python${minor}-dev"
+    echo "  ${C_DIM}$(t python_extra "$minor" "$minor")${C_RESET}"
   fi
+}
+
+_nvm_installer() {
+  local url="https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_RESOLVED}/install.sh"
+  if [[ "${SEL[terminal]}" == true ]]; then
+    # our generated ~/.zshrc loads nvm, so keep the installer away from the profile files
+    curl -fsSL "$url" | PROFILE=/dev/null bash
+  else
+    curl -fsSL "$url" | bash
+  fi
+}
+
+_nvm_node_install() {
+  local target="$1"
+  export NVM_DIR="$HOME/.nvm"
+  # nvm.sh does not play well with set -eu
+  set +eu
+  # shellcheck disable=SC1091
+  . "$NVM_DIR/nvm.sh"
+  nvm install "$target" || return 1
+  nvm alias default "$(nvm current)" || return 1
+  corepack enable 2>/dev/null   # pnpm/yarn; fine if it is not available
+  return 0
 }
 
 install_node() {
   local target
   target="$(node_target)"
   L node_install "$NVM_RESOLVED" "$target"
-  export NVM_DIR="$HOME/.nvm"
-  if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
-    if [[ "${SEL[terminal]}" == true ]]; then
-      # our generated ~/.zshrc loads nvm, so keep the installer away from the profile files
-      curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_RESOLVED}/install.sh" | PROFILE=/dev/null bash
-    else
-      curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_RESOLVED}/install.sh" | bash
-    fi
+  if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+    echo "  ${C_DIM}$(t nvm_already)${C_RESET}"
   else
-    echo "$(t nvm_already)"
+    run "nvm ${NVM_RESOLVED}" _nvm_installer
   fi
+  run "Node.js ${target}" _nvm_node_install "$target"
+}
 
-  # nvm.sh does not play well with set -eu
-  set +eu
-  # shellcheck disable=SC1091
-  . "$NVM_DIR/nvm.sh"
-  nvm install "$target"
-  nvm alias default "$(nvm current)"
-  set -eu
-
-  # pnpm/yarn via corepack
-  corepack enable 2>/dev/null || W corepack_warn
+_docker_install_pkgs() {
+  local pkg
+  for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+    sudo apt-get remove -y "$pkg" >/dev/null 2>&1 || true
+  done
+  sudo apt-get install -y --allow-downgrades "$@"
 }
 
 install_docker() {
   if has docker; then
-    L docker_already
+    echo "  ${C_DIM}$(t docker_already)${C_RESET}"
   else
     L docker_install
-    local pkg
-    for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
-      sudo apt-get remove -y "$pkg" >/dev/null 2>&1 || true
-    done
     prepare_docker_repo
-    sudo apt-get update -qq
-
     local engine=(docker-ce docker-ce-cli)
     if [[ "${VPIN[docker]}" == true ]]; then
       engine=("docker-ce=${VEXACT[docker]}" "docker-ce-cli=${VEXACT[docker]}")
     fi
-    sudo apt-get install -y --allow-downgrades "${engine[@]}" containerd.io docker-buildx-plugin docker-compose-plugin
+    run "$(t inst_pkgs "Docker Engine + Compose")" \
+      _docker_install_pkgs "${engine[@]}" containerd.io docker-buildx-plugin docker-compose-plugin
     hold_pinned docker docker-ce docker-ce-cli
   fi
 
-  sudo systemctl enable --now docker 2>/dev/null || W docker_service_warn
+  run_soft "$(t docker_service)" sudo systemctl enable --now docker || true
 
   if ! id -nG "$USER" | grep -qw docker; then
     sudo usermod -aG docker "$USER"
-    L docker_group "$USER"
+    ok "$(t docker_group "$USER")"
   fi
 }
 
 install_vscode() {
   if has code; then
-    L vscode_already
+    echo "  ${C_DIM}$(t vscode_already)${C_RESET}"
   else
     L vscode_install
     prepare_vscode_repo
-    sudo apt-get update -qq
     if [[ "${VPIN[vscode]}" == true ]]; then
-      sudo apt-get install -y --allow-downgrades "code=${VEXACT[vscode]}"
+      run "$(t inst_pkgs "VS Code ${VEXACT[vscode]}")" sudo apt-get install -y --allow-downgrades "code=${VEXACT[vscode]}"
       hold_pinned vscode code
     else
-      sudo apt-get install -y code
+      run "$(t inst_pkgs "VS Code")" sudo apt-get install -y code
     fi
   fi
 
@@ -1232,28 +1692,23 @@ install_vscode() {
     L vscode_ext
     local ext
     for ext in "${VSCODE_EXTENSIONS[@]}"; do
-      if code --install-extension "$ext" --force >/dev/null 2>&1; then
-        echo "$(t ext_ok "$ext")"
-      else
-        W ext_fail "$ext"
-      fi
+      run_soft "$(t ext_install "$ext")" code --install-extension "$ext" --force || true
     done
   fi
 }
 
 install_gh() {
   if has gh; then
-    L gh_already
+    echo "  ${C_DIM}$(t gh_already)${C_RESET}"
     return
   fi
   L gh_install
   prepare_gh_repo
-  sudo apt-get update -qq
   if [[ "${VPIN[gh]}" == true ]]; then
-    sudo apt-get install -y --allow-downgrades "gh=${VEXACT[gh]}"
+    run "$(t inst_pkgs "GitHub CLI ${VEXACT[gh]}")" sudo apt-get install -y --allow-downgrades "gh=${VEXACT[gh]}"
     hold_pinned gh gh
   else
-    sudo apt-get install -y gh
+    run "$(t inst_pkgs "GitHub CLI")" sudo apt-get install -y gh
   fi
 }
 
@@ -1262,6 +1717,7 @@ configure_git() {
   git config --global init.defaultBranch main
   if [[ -n "$GIT_NAME" ]];  then git config --global user.name  "$GIT_NAME";  fi
   if [[ -n "$GIT_EMAIL" ]]; then git config --global user.email "$GIT_EMAIL"; fi
+  ok "git config --global"
   if [[ -z "$GIT_NAME" || -z "$GIT_EMAIL" ]]; then
     W git_skip_warn
   fi
@@ -1273,7 +1729,7 @@ write_zshrc() {
     local backup
     backup="$HOME/.zshrc.bak.$(date +%Y%m%d-%H%M%S)"
     cp "$HOME/.zshrc" "$backup"
-    echo "$(t zshrc_backup "$backup")"
+    echo "  ${C_DIM}$(t zshrc_backup "$backup")${C_RESET}"
   fi
 
   # Plugin list follows what was actually selected (syntax-highlighting must stay last)
@@ -1365,6 +1821,8 @@ ZSHRC_EOF
     -e "s|@@L_UPTIME@@|$(t L_uptime)|g" \
     -e "s|@@L_USED_OF@@|$(t L_used_of)|g" \
     "$HOME/.zshrc"
+  # shellcheck disable=SC2088  # literal "~" is intentional in this message
+  ok "~/.zshrc"
 }
 
 set_default_shell() {
@@ -1372,10 +1830,9 @@ set_default_shell() {
   local zsh_path
   zsh_path="$(command -v zsh)"
   if [[ "$SHELL" != "$zsh_path" ]]; then
-    sudo chsh -s "$zsh_path" "$USER"
-    echo "$(t shell_done "$zsh_path")"
+    run "$(t shell_done "$zsh_path")" sudo chsh -s "$zsh_path" "$USER"
   else
-    echo "$(t shell_already)"
+    echo "  ${C_DIM}$(t shell_already)${C_RESET}"
   fi
 }
 
@@ -1388,25 +1845,35 @@ generate_ssh_key() {
     echo "$(t ssh_pub)"
     cat "$HOME/.ssh/id_ed25519.pub"
   elif [[ "$SSH_EXISTS" == true ]]; then
-    echo "$(t ssh_exists)"
+    echo "  ${C_DIM}$(t ssh_exists)${C_RESET}"
   fi
 }
 
+# node/npm live inside nvm, so look at them in a subshell that loads nvm
+node_tool_version() {
+  ( set +eu
+    # shellcheck disable=SC1091
+    if [[ -s "$HOME/.nvm/nvm.sh" ]]; then . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; fi
+    "$1" "$2" 2>/dev/null ) || true
+}
+
 summary() {
+  local nv npmv
+  nv="$(node_tool_version node -v)"
+  npmv="$(node_tool_version npm -v)"
   echo
-  echo "============== $(t summary_title) =============="
-  printf "zsh     : %s\n" "$(zsh --version 2>/dev/null || echo '-')"
-  printf "git     : %s\n" "$(git --version 2>/dev/null || echo '-')"
-  printf "python3 : %s\n" "$(python3 --version 2>/dev/null || echo '-')"
-  printf "node    : %s\n" "$(node -v 2>/dev/null || echo '-')"
-  printf "npm     : %s\n" "$(npm -v 2>/dev/null || echo '-')"
-  printf "docker  : %s\n" "$(docker --version 2>/dev/null || echo '-')"
-  printf "compose : %s\n" "$(docker compose version 2>/dev/null || echo '-')"
-  printf "code    : %s\n" "$(code --version 2>/dev/null | head -n1 || echo '-')"
-  printf "gh      : %s\n" "$(gh --version 2>/dev/null | head -n1 || echo '-')"
-  echo "================================================"
+  printf '%s%s%s\n' "$C_BOLD" "$(t summary_title)" "$C_RESET"
+  printf "  %-8s %s\n" "zsh"     "$(zsh --version 2>/dev/null || echo '-')"
+  printf "  %-8s %s\n" "git"     "$(git --version 2>/dev/null || echo '-')"
+  printf "  %-8s %s\n" "python3" "$(python3 --version 2>/dev/null || echo '-')"
+  printf "  %-8s %s\n" "node"    "${nv:--}"
+  printf "  %-8s %s\n" "npm"     "${npmv:--}"
+  printf "  %-8s %s\n" "docker"  "$(docker --version 2>/dev/null || echo '-')"
+  printf "  %-8s %s\n" "compose" "$(docker compose version 2>/dev/null || echo '-')"
+  printf "  %-8s %s\n" "code"    "$(code --version 2>/dev/null | head -n1 || echo '-')"
+  printf "  %-8s %s\n" "gh"      "$(gh --version 2>/dev/null | head -n1 || echo '-')"
   echo
-  echo "$(t final_title)"
+  printf '%s%s%s\n' "$C_BOLD" "$(t final_title)" "$C_RESET"
   echo "  $(t final_1)"
   echo "  $(t final_2)"
   echo "  $(t final_3)"
@@ -1414,6 +1881,7 @@ summary() {
   echo "  $(t final_5)"
   echo
   echo "$(t final_tip)"
+  printf '%s%s%s\n' "$C_DIM" "$(t log_path "$LOG_FILE")" "$C_RESET"
 }
 
 # ===============================================================
@@ -1422,6 +1890,7 @@ summary() {
 main() {
   parse_args "$@"
   detect_interactive
+  init_term
 
   if [[ "$SHOW_HELP" == true ]]; then
     LANG_CODE="$(detect_lang)"
@@ -1433,15 +1902,17 @@ main() {
     exit 0
   fi
 
-  select_language
   trap cleanup EXIT
+  trap 'exit 130' INT TERM
+  select_language
   preflight
+  init_log
 
   if [[ -n "$COMPONENTS_ARG" ]]; then apply_components_arg; fi
 
   echo
   echo "$(t intro_title)"
-  echo "$(t intro_note)"
+  echo "${C_DIM}$(t intro_note)${C_RESET}"
 
   select_components
   if ! any_selected; then
@@ -1464,6 +1935,7 @@ main() {
   if [[ "${SEL[base]}" == true ]]; then install_base_dev; fi
 
   if [[ "${SEL[terminal]}" == true ]]; then
+    L c_terminal_name
     install_fastfetch
     install_ohmyzsh
     install_font
